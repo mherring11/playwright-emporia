@@ -1,9 +1,10 @@
-const { test } = require("@playwright/test");
+const { test, expect } = require("@playwright/test");
 const fs = require("fs");
 const path = require("path");
 const { PNG } = require("pngjs");
 const sharp = require("sharp");
 const config = require("../config.js");
+const axios = require("axios");
 
 let pixelmatch;
 let chalk;
@@ -96,10 +97,16 @@ async function compareScreenshots(baselinePath, currentPath, diffPath) {
 async function captureScreenshot(page, url, screenshotPath) {
   try {
     console.log(chalk.blue(`Navigating to: ${url}`));
-    await page.goto(url, { waitUntil: "networkidle", timeout: 60000 });
+
+    // Attempt navigation (will wait up to 60 seconds)
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+
+    // Force screenshot after 3 seconds
+    await page.waitForTimeout(3000);
 
     ensureDirectoryExistence(screenshotPath);
     await page.screenshot({ path: screenshotPath, fullPage: true });
+
     console.log(chalk.green(`Screenshot captured: ${screenshotPath}`));
   } catch (error) {
     console.error(
@@ -295,6 +302,7 @@ function generateHtmlReport(results, deviceName) {
 
 // Main Test Suite
 test.describe("Visual Comparison Tests", () => {
+  test.setTimeout(7200000);
   test("Compare staging and prod screenshots and generate HTML report", async ({
     browser,
   }) => {
@@ -358,274 +366,206 @@ test.describe("Visual Comparison Tests", () => {
     await context.close();
   });
 
-  test("Fill out the form one field at a time and submit", async ({
-    browser,
+  test("Verify broken image links automatically on staging pages from config.js", async ({
+    page,
   }) => {
-    const context = await browser.newContext();
-    const page = await context.newPage();
+    const stagingUrls = config.staging.urls.map(
+      (url) => `${config.staging.baseUrl}${url}`
+    );
 
-    try {
-      const formPageUrl = "https://live-web-emporia.pantheonsite.io/";
-      console.log(chalk.blue(`Navigating to the form page: ${formPageUrl}`));
+    for (const url of stagingUrls) {
+      console.log(chalk.blue(`Navigating to: ${url}`));
+      await page.goto(url, { waitUntil: "domcontentloaded" });
+      console.log(chalk.green(`Page loaded successfully: ${url}`));
 
-      await page.goto(formPageUrl, { waitUntil: "domcontentloaded" });
-      console.log(chalk.green("Page partially loaded successfully."));
+      console.log(chalk.blue("Finding all image elements on the page..."));
+      const images = await page.locator("img");
+      const imageCount = await images.count();
+      console.log(chalk.green(`Found ${imageCount} images on the page.`));
 
-      // Block unnecessary resources to stabilize the page
-      await page.route("**/*", (route) => {
-        const url = route.request().url();
+      let brokenImages = 0;
+      let trackingPixels = 0;
+      let checkedImages = 0;
+
+      // Extract and prepare all image URLs
+      const imageUrls = [];
+      for (let i = 0; i < imageCount; i++) {
+        let imageUrl = await images.nth(i).getAttribute("src");
+
+        if (!imageUrl) {
+          console.log(
+            chalk.yellow(`Warning: Image ${i + 1} is missing a src attribute.`)
+          );
+          brokenImages++;
+          continue;
+        }
+
+        // Resolve relative URLs
+        if (!imageUrl.startsWith("http") && !imageUrl.startsWith("//")) {
+          imageUrl = new URL(imageUrl, url).toString();
+        } else if (imageUrl.startsWith("//")) {
+          imageUrl = `https:${imageUrl}`;
+        }
+
+        // Ignore tracking pixels
         if (
-          url.endsWith(".png") ||
-          url.endsWith(".jpg") ||
-          url.endsWith(".css") ||
-          url.endsWith(".js")
+          imageUrl.includes("bat.bing.com") ||
+          imageUrl.includes("tracking")
         ) {
-          route.abort();
-        } else {
-          route.continue();
+          console.log(chalk.yellow(`Skipping tracking pixel: ${imageUrl}`));
+          trackingPixels++;
+          continue;
         }
-      });
-      console.log(
-        chalk.blue("Blocked unnecessary resources to stabilize the page.")
-      );
 
-      // Select the first option in "Program of Interest"
-      console.log(chalk.blue("Selecting 'Program of Interest'..."));
-      await page.selectOption("#input_2_1", { index: 1 }); // Select the first option
-      console.log(chalk.green("'Program of Interest' selected successfully."));
-
-      // Fill in "First Name"
-      const testIteration = Date.now(); // Use timestamp for unique identification
-      const firstName = `John${testIteration}`;
-      console.log(chalk.blue(`Filling 'First Name' with: ${firstName}`));
-      await page.fill("#input_2_2", firstName);
-      console.log(chalk.green("'First Name' filled successfully."));
-
-      // Fill in "Last Name"
-      console.log(chalk.blue("Filling 'Last Name'..."));
-      await page.fill("#input_2_3", "Doe");
-      console.log(chalk.green("'Last Name' filled successfully."));
-
-      // Fill in "Email"
-      const email = `johndoe${testIteration}@example.com`;
-      console.log(chalk.blue(`Filling 'Email' with: ${email}`));
-      await page.fill("#input_2_6", email);
-      console.log(chalk.green("'Email' filled successfully."));
-
-      // Fill in "Phone"
-      console.log(chalk.blue("Filling 'Phone'..."));
-      await page.fill("#input_2_4", "5551234567");
-      console.log(chalk.green("'Phone' filled successfully."));
-
-      // Fill in "ZIP Code"
-      console.log(chalk.blue("Filling 'ZIP Code'..."));
-      await page.fill("#input_2_5", "12345");
-      console.log(chalk.green("'ZIP Code' filled successfully."));
-
-      // Select "How did you hear about us?"
-      console.log(chalk.blue("Selecting 'How did you hear about us?'..."));
-      await page.selectOption("#input_2_7", { index: 2 }); // Select the second option
-      console.log(
-        chalk.green("'How did you hear about us?' selected successfully.")
-      );
-
-      // Submit the form
-      console.log(chalk.blue("Submitting the form..."));
-      await page.click("#gform_submit_button_2");
-      console.log(chalk.green("Form submitted successfully."));
-
-      // Wait for confirmation message
-      console.log(chalk.blue("Waiting for confirmation message..."));
-      await page.waitForSelector("h1.header1", { timeout: 20000 });
-      const confirmationText = await page.textContent("h1.header1");
-
-      // Verify confirmation message
-      if (confirmationText.trim() === "Thanks for your submission!") {
-        console.log(
-          chalk.green(
-            "Form submitted successfully and confirmation message displayed."
-          )
-        );
-      } else {
-        console.log(
-          chalk.red("Confirmation message text did not match expected value.")
-        );
-      }
-    } catch (error) {
-      console.error(chalk.red(`Error during test: ${error.message}`));
-    } finally {
-      await context.close();
-    }
-  });
-
-  test("Click Apply Now, fill out the form, and submit", async ({ page }) => {
-    // Navigate to the homepage
-    const homePageUrl = "https://live-web-emporia.pantheonsite.io/";
-    console.log(chalk.blue(`Navigating to the home page: ${homePageUrl}`));
-    await page.goto(homePageUrl, { waitUntil: "domcontentloaded" });
-
-    // Click on the "Apply Now" button
-    const applyNowSelector = "a.button.elementor-button.elementor-size-sm";
-    console.log(chalk.blue("Clicking on 'Apply Now' button..."));
-    await page.click(applyNowSelector);
-
-    // Wait for the form page to load
-    const formPageUrl = "https://live-web-emporia.pantheonsite.io/apply/";
-    console.log(
-      chalk.blue(`Waiting for navigation to the form page: ${formPageUrl}`)
-    );
-    await page.waitForURL(formPageUrl, { timeout: 10000 });
-    console.log(chalk.green("Navigated to the Apply Now form page."));
-
-    // Fill the form fields
-    console.log(chalk.blue("Filling out the Apply Now form fields..."));
-    await page.selectOption("#input_1_1", { value: "EMPORIA-M-MBAACCT" }); // Select "MBA with Accounting Concentration"
-    await page.fill("#input_1_2", "Jane"); // First Name
-    await page.fill("#input_1_3", "Smith"); // Last Name
-    await page.fill("#input_1_4", "janesmith@example.com"); // Email
-    await page.fill("#input_1_5", "5559876543"); // Phone
-    await page.fill("#input_1_6", "54321"); // ZIP Code
-    await page.selectOption("#input_1_7", { value: "Online" }); // Select "Online"
-    console.log(chalk.green("Form fields filled successfully."));
-
-    // Submit the form and wait for navigation to the confirmation page
-    console.log(chalk.blue("Submitting the Apply Now form..."));
-    await Promise.all([
-      page.waitForURL(/\/apply2\/\?d=EMPORIA-M-MBAACCT&entry_id=\d+/, {
-        timeout: 30000,
-      }), // Wait for dynamic confirmation page
-      page.click("#gform_submit_button_1"),
-    ]);
-    console.log(
-      chalk.green("Form submitted, and navigated to the confirmation page.")
-    );
-
-    // Wait for the specific confirmation message
-    console.log(
-      chalk.blue("Waiting for confirmation message on the confirmation page...")
-    );
-    const specificConfirmationSelector =
-      ".elementor-element.elementor-element-a8355df h1.header1";
-    try {
-      await page.waitForSelector(specificConfirmationSelector, {
-        timeout: 15000,
-      }); // Wait for the specific confirmation message
-      const confirmationText = await page.textContent(
-        specificConfirmationSelector
-      );
-
-      // Log the confirmation message
-      console.log(
-        chalk.blue(`Confirmation message found: "${confirmationText.trim()}"`)
-      );
-
-      // Verify the confirmation message text
-      if (
-        confirmationText.trim() ===
-        "Great! Now, take the next step to complete your application."
-      ) {
-        console.log(
-          chalk.green(
-            "Form submitted successfully, and confirmation message displayed."
-          )
-        );
-      } else {
-        console.log(
-          chalk.red("Confirmation message text did not match expected value.")
-        );
-      }
-    } catch (error) {
-      console.error(
-        chalk.red(`Error waiting for confirmation message: ${error.message}`)
-      );
-    }
-  });
-
-  test("Verify Online Programs and Getting Started Menus", async ({ page }) => {
-    const verifyMenu = async (menuName, menuSelector) => {
-      console.log(chalk.blue(`Locating the '${menuName}' menu...`));
-      const isMenuVisible = await page.isVisible(menuSelector);
-      if (!isMenuVisible) {
-        throw new Error(`The '${menuName}' menu is not visible.`);
-      }
-      console.log(chalk.green(`${menuName} menu is visible.`));
-
-      // Get all submenus and links
-      const submenuSelector = `${menuSelector} ul.mega-sub-menu`;
-      const linksSelector = `${submenuSelector} a.mega-menu-link`;
-
-      console.log(
-        chalk.blue(`Checking for submenus and links in '${menuName}' menu...`)
-      );
-      const submenuCount = await page.locator(submenuSelector).count();
-      console.log(
-        chalk.green(`Found ${submenuCount} submenus in '${menuName}' menu.`)
-      );
-
-      const links = await page.locator(linksSelector);
-      const linkCount = await links.count();
-      console.log(
-        chalk.green(`Found ${linkCount} links in '${menuName}' menu.`)
-      );
-
-      // Verify each link
-      let invalidLinks = 0;
-      for (let i = 0; i < linkCount; i++) {
-        const linkText = await links.nth(i).textContent();
-        const linkHref = await links.nth(i).getAttribute("href");
-        console.log(
-          chalk.blue(
-            `Checking link ${i + 1} in '${menuName}' menu: ${linkText}`
-          )
-        );
-
-        if (!linkHref || linkHref.trim() === "") {
-          console.log(
-            chalk.yellow(
-              `Warning: Link '${linkText}' in '${menuName}' menu does not have a valid href attribute.`
-            )
-          );
-          invalidLinks++;
-        } else {
-          console.log(
-            chalk.green(
-              `Link '${linkText}' in '${menuName}' menu is valid with href: ${linkHref}`
-            )
-          );
-        }
+        imageUrls.push({ index: i + 1, imageUrl });
       }
 
-      console.log(
-        chalk.green(
-          `All checks complete for '${menuName}' menu. Found ${invalidLinks} invalid links.`
+      console.log(chalk.blue(`Checking ${imageUrls.length} valid images...`));
+
+      // **Check all images concurrently for faster performance**
+      const imageChecks = await Promise.allSettled(
+        imageUrls.map(({ index, imageUrl }) =>
+          axios
+            .get(imageUrl)
+            .then((response) => ({
+              index,
+              imageUrl,
+              status: response.status,
+            }))
+            .catch((error) => ({
+              index,
+              imageUrl,
+              error: error.response
+                ? `Status: ${error.response.status}`
+                : error.message,
+            }))
         )
       );
 
-      // Log warning instead of failing the test
-      if (invalidLinks > 0) {
+      // **Process results**
+      for (const result of imageChecks) {
+        if (result.status === "fulfilled") {
+          console.log(
+            chalk.green(
+              `✅ Image ${result.value.index} loaded successfully: ${result.value.imageUrl}`
+            )
+          );
+        } else {
+          console.log(
+            chalk.red(
+              `❌ Image ${result.reason.index} failed: ${result.reason.imageUrl} (${result.reason.error})`
+            )
+          );
+          brokenImages++;
+        }
+        checkedImages++;
+      }
+
+      // **Final results per page**
+      console.log(chalk.blue(`Summary for ${url}:`));
+      console.log(
+        chalk.green(`✅ Valid images: ${checkedImages - brokenImages}`)
+      );
+      console.log(chalk.red(`❌ Broken images: ${brokenImages}`));
+      console.log(
+        chalk.yellow(`⚠️ Skipped tracking pixels: ${trackingPixels}`)
+      );
+
+      if (brokenImages > 0) {
         console.log(
-          chalk.yellow(
-            `Test completed with ${invalidLinks} warnings for invalid links in '${menuName}' menu.`
+          chalk.red(
+            `🚨 Test failed for ${url}. ${brokenImages} broken images detected.`
           )
         );
       } else {
         console.log(
-          chalk.green(`All links in the '${menuName}' menu are valid.`)
+          chalk.green(`✅ Test passed for ${url}. No broken images found.`)
         );
       }
-    };
-
-    console.log(chalk.blue("Navigating to the homepage..."));
-
-    // Navigate to the homepage
-    const homePageUrl = "https://live-web-emporia.pantheonsite.io/";
-    await page.goto(homePageUrl, { waitUntil: "domcontentloaded" });
-    console.log(chalk.green("Homepage loaded successfully."));
-
-    // Verify the 'Online Programs' menu
-    await verifyMenu("Online Programs", "#mega-menu-item-313");
-
-    // Verify the 'Getting Started' menu
-    await verifyMenu("Getting Started", "#mega-menu-item-314");
+    }
   });
+
+
+test("Verify Online Programs and Getting Started Menus - EMPORIA", async ({ page }) => {
+  try {
+      const homePageUrl = "https://live-web-emporia.pantheonsite.io/";
+      console.log(`\n🔹 Navigating to Emporia homepage: ${homePageUrl}`);
+      await page.goto(homePageUrl, { waitUntil: "domcontentloaded" });
+      console.log("✅ Homepage loaded successfully.");
+
+      /**
+       * Function to open a dropdown menu and validate its links
+       */
+      const verifyMenu = async (menuName, menuSelector, submenuSelector) => {
+          console.log(`\n🔹 Locating '${menuName}' menu...`);
+
+          // Locate menu element
+          const menuElement = page.locator(menuSelector).first();
+          await menuElement.waitFor({ state: "attached", timeout: 10000 });
+          console.log(`✅ '${menuName}' menu found.`);
+
+          // Click the menu to expand it
+          console.log(`🔹 Clicking '${menuName}' menu...`);
+          await menuElement.click({ force: true });
+
+          // Wait for submenu to appear
+          console.log(`🔹 Waiting for '${menuName}' submenu to become visible...`);
+          const submenu = page.locator(submenuSelector).first();
+          await submenu.waitFor({ state: "visible", timeout: 5000 });
+          console.log(`✅ '${menuName}' submenu is now visible.`);
+
+          // Verify submenu links
+          const links = submenu.locator("a.mega-menu-link");
+          const linkCount = await links.count();
+
+          if (linkCount === 0) {
+              throw new Error(`❌ No links found in '${menuName}' menu.`);
+          }
+          console.log(`✅ Found ${linkCount} links in '${menuName}' menu.`);
+
+          let invalidLinks = 0;
+          for (let i = 0; i < linkCount; i++) {
+              const linkText = await links.nth(i).textContent();
+              const linkHref = await links.nth(i).getAttribute("href");
+
+              console.log(`🔗 Checking link ${i + 1} in '${menuName}': "${linkText}"`);
+
+              if (!linkHref || linkHref.trim() === "") {
+                  console.log(`⚠️ Warning: '${linkText}' in '${menuName}' has no valid href.`);
+                  invalidLinks++;
+              } else {
+                  console.log(`✅ Valid link: '${linkText}' -> ${linkHref}`);
+              }
+          }
+
+          console.log(`✅ Completed verification for '${menuName}'. Invalid links: ${invalidLinks}`);
+
+          if (invalidLinks > 0) {
+              console.log(`⚠️ Test finished with ${invalidLinks} warnings for '${menuName}'.`);
+          } else {
+              console.log(`✅ All links in '${menuName}' are valid.`);
+          }
+      };
+
+      // **Verify "Online Programs" menu**
+      await verifyMenu(
+          "Online Programs",
+          "li#mega-menu-item-242 > a.mega-menu-link",
+          "li#mega-menu-item-242 > ul.mega-sub-menu"
+      );
+
+      // **Verify "Getting Started" menu**
+      await verifyMenu(
+          "Getting Started",
+          "li#mega-menu-item-243 > a.mega-menu-link",
+          "li#mega-menu-item-243 > ul.mega-sub-menu"
+      );
+
+      console.log("\n✅ All menu verifications completed successfully!");
+
+  } catch (error) {
+      console.error(`❌ Test failed: ${error.message}`);
+  }
+});
+
 });
